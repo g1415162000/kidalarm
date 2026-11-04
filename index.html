@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>兒童自律提醒鬧鐘與習慣養成系統</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Google Fonts Inter & Noto Sans TC -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&family=Noto+Sans+TC:wght@400;700;900&display=swap" rel="stylesheet">
+  <!-- React & Babel CDNs -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <style>
+    body {
+      font-family: 'Noto Sans TC', 'Inter', sans-serif;
+    }
+    @keyframes bounce-gentle {
+      0%, 100% { transform: translateY(-3%); }
+      50% { transform: translateY(0); }
+    }
+    .animate-bounce-gentle {
+      animation: bounce-gentle 2s infinite ease-in-out;
+    }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800 select-none">
+  <div id="root"></div>
+
+  <!-- Firebase v11 SDKs via ES Modules -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    // 使用您提供專屬的 Firebase 設定
+    const firebaseConfig = {
+      apiKey: "AIzaSyAHisZyZDVQYIKDBFv5uqwTRk1GFztg-g0",
+      authDomain: "kidalarm-a8b85.firebaseapp.com",
+      projectId: "kidalarm-a8b85",
+      storageBucket: "kidalarm-a8b85.firebasestorage.app",
+      messagingSenderId: "393307278809",
+      appId: "1:393307278809:web:a8577d2997447ae5cd9dc8"
+    };
+
+    // 初始化 Firebase
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+
+    // 將 Firebase 實例曝露給全域以供 React 元件存取
+    window.firebaseApp = app;
+    window.firebaseAuth = auth;
+    window.firebaseDb = db;
+    window.firebaseHelpers = { doc, setDoc, onSnapshot, signInAnonymously };
+  </script>
+
+  <!-- Main React App Script -->
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // 預設習慣任務列表
+    const INITIAL_TASKS = [
+      { id: '1', title: '起床刷牙洗臉', time: '07:30', stars: 2, icon: '🪥', sound: 'chime', imageUrl: '', audioUrl: '', completed: false },
+      { id: '2', title: '吃營養早餐', time: '08:00', stars: 1, icon: '🍳', sound: 'cheer', imageUrl: '', audioUrl: '', completed: false },
+      { id: '3', title: '寫作業與閱讀', time: '16:30', stars: 3, icon: '📚', sound: 'chime', imageUrl: '', audioUrl: '', completed: false },
+      { id: '4', title: '收拾玩具書包', time: '19:00', stars: 2, icon: '🧸', sound: 'cheer', imageUrl: '', audioUrl: '', completed: false },
+      { id: '5', title: '洗澡洗頭準備', time: '20:30', stars: 2, icon: '🛁', sound: 'chime', imageUrl: '', audioUrl: '', completed: false },
+      { id: '6', title: '上床睡覺囉', time: '21:30', stars: 3, icon: '🛌', sound: 'chime', imageUrl: '', audioUrl: '', completed: false }
+    ];
+
+    function App() {
+      const [viewMode, setViewMode] = useState('kid'); // 'kid' 或 'parent'
+      const [isPinLocked, setIsPinLocked] = useState(true);
+      const [pinInput, setPinInput] = useState('');
+      const [pinError, setPinError] = useState(false);
+      const parentPin = '1234';
+
+      const [audioEnabled, setAudioEnabled] = useState(false);
+      const audioCtxRef = useRef(null);
+
+      const [currentTime, setCurrentTime] = useState(new Date());
+      const [weather, setWeather] = useState({ temp: '26°C', label: '晴朗舒適', icon: '☀️' });
+
+      const [tasks, setTasks] = useState(INITIAL_TASKS);
+      const [totalStars, setTotalStars] = useState(12);
+      const [activeAlarmTask, setActiveAlarmTask] = useState(null);
+      const [triggeredToday, setTriggeredToday] = useState(new Set());
+
+      const [newTaskForm, setNewTaskForm] = useState({
+        title: '',
+        time: '12:00',
+        stars: 2,
+        icon: '🍦',
+        sound: 'chime',
+        imageUrl: '',
+        audioUrl: ''
+      });
+
+      // 1. Firebase 連線與即時資料同步
+      useEffect(() => {
+        let unsubscribe = () => {};
+
+        const initFirebaseSync = async () => {
+          if (!window.firebaseDb || !window.firebaseHelpers) {
+            setTimeout(initFirebaseSync, 300);
+            return;
+          }
+
+          const { doc, setDoc, onSnapshot, signInAnonymously } = window.firebaseHelpers;
+          const auth = window.firebaseAuth;
+          const db = window.firebaseDb;
+
+          try {
+            await signInAnonymously(auth);
+          } catch (e) {
+            console.warn("匿名驗證失敗，切換為離線模式:", e);
+          }
+
+          const docRef = doc(db, 'artifacts', 'kidalarm-app', 'public', 'data', 'routineData');
+          
+          unsubscribe = onSnapshot(docRef, (docSnap) => {
+            if (docSnap.exists()) {
+              const data = docSnap.data();
+              if (data.tasks) setTasks(data.tasks);
+              if (data.totalStars !== undefined) setTotalStars(data.totalStars);
+            } else {
+              setDoc(docRef, { tasks: INITIAL_TASKS, totalStars: 12 }, { merge: true });
+            }
+          }, (err) => {
+            console.error("Firestore 同步問題:", err);
+          });
+        };
+
+        initFirebaseSync();
+        return () => unsubscribe();
+      }, []);
+
+      // 2. 雲端同步發送函式
+      const syncToCloud = async (updatedTasks, updatedStars) => {
+        if (!window.firebaseDb || !window.firebaseHelpers) return;
+        const { doc, setDoc } = window.firebaseHelpers;
+        const db = window.firebaseDb;
+
+        try {
+          const docRef = doc(db, 'artifacts', 'kidalarm-app', 'public', 'data', 'routineData');
+          await setDoc(docRef, {
+            tasks: updatedTasks ?? tasks,
+            totalStars: updatedStars ?? totalStars,
+            updatedAt: new Date().toISOString()
+          }, { merge: true });
+        } catch (err) {
+          console.error("更新至 Firestore 失敗:", err);
+        }
+      };
+
+      // 3. 時鐘輪詢與鬧鐘觸發
+      useEffect(() => {
+        const timer = setInterval(() => {
+          const now = new Date();
+          setCurrentTime(now);
+
+          const hrs = String(now.getHours()).padStart(2, '0');
+          const mins = String(now.getMinutes()).padStart(2, '0');
+          const timeStr = `${hrs}:${mins}`;
+          const triggerKey = `${now.toDateString()}_${timeStr}`;
+
+          tasks.forEach(task => {
+            if (!task.completed && task.time === timeStr) {
+              const key = `${task.id}_${triggerKey}`;
+              if (!triggeredToday.has(key)) {
+                setTriggeredToday(prev => new Set(prev).add(key));
+                triggerAlarm(task);
+              }
+            }
+          });
+        }, 1000);
+
+        return () => clearInterval(timer);
+      }, [tasks, triggeredToday]);
+
+      // 4. Web Audio 與自訂音效播放器
+      const initAudio = () => {
+        if (!audioCtxRef.current) {
+          const AudioCtx = window.AudioContext || window.webkitAudioContext;
+          audioCtxRef.current = new AudioCtx();
+        }
+        if (audioCtxRef.current.state === 'suspended') {
+          audioCtxRef.current.resume();
+        }
+        setAudioEnabled(true);
+      };
+
+      const playSoundEffect = (soundType = 'chime', customAudioUrl = '') => {
+        if (customAudioUrl) {
+          try {
+            const customAudio = new Audio(customAudioUrl);
+            customAudio.play().catch(e => console.warn("無法播放自訂音效，改用預設音效", e));
+            return;
+          } catch(e) {}
+        }
+
+        if (!audioCtxRef.current) return;
+        const ctx = audioCtxRef.current;
+        const now = ctx.currentTime;
+
+        if (soundType === 'cheer') {
+          const notes = [261.63, 329.63, 392.00, 523.25, 659.25, 783.99];
+          notes.forEach((freq, idx) => {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(freq, now + idx * 0.1);
+            gain.gain.setValueAtTime(0.3, now + idx * 0.1);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.1 + 0.4);
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start(now + idx * 0.1);
+            osc.stop(now + idx * 0.1 + 0.4);
+          });
+        } else {
+          const freqs = [523.25, 659.25, 783.99];
+          freqs.forEach((f, i) => {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(f, now + i * 0.15);
+            gain.gain.setValueAtTime(0.4, now + i * 0.15);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.15 + 0.7);
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start(now + i * 0.15);
+            osc.stop(now + i * 0.15 + 0.7);
+          });
+        }
+      };
+
+      const triggerAlarm = (task) => {
+        setActiveAlarmTask(task);
+        if (audioEnabled) {
+          playSoundEffect(task.sound || 'chime', task.audioUrl);
+        }
+      };
+
+      // 5. 任務操作控制
+      const handleCompleteTask = (taskId) => {
+        const updated = tasks.map(t => t.id === taskId ? { ...t, completed: true } : t);
+        const target = tasks.find(t => t.id === taskId);
+        const earned = target ? target.stars : 2;
+        const newStars = totalStars + earned;
+
+        setTasks(updated);
+        setTotalStars(newStars);
+        syncToCloud(updated, newStars);
+        setActiveAlarmTask(null);
+
+        if (audioEnabled) playSoundEffect('cheer');
+      };
+
+      const handleToggleTaskStatus = (taskId) => {
+        const updated = tasks.map(t => {
+          if (t.id === taskId) {
+            const nextCompleted = !t.completed;
+            const diff = nextCompleted ? t.stars : -t.stars;
+            setTotalStars(prev => Math.max(0, prev + diff));
+            return { ...t, completed: nextCompleted };
+          }
+          return t;
+        });
+        setTasks(updated);
+        syncToCloud(updated, totalStars);
+      };
+
+      const handleAddNewTask = (e) => {
+        e.preventDefault();
+        if (!newTaskForm.title.trim()) return;
+
+        const newTask = {
+          id: Date.now().toString(),
+          title: newTaskForm.title,
+          time: newTaskForm.time,
+          stars: Number(newTaskForm.stars),
+          icon: newTaskForm.icon || '🍦',
+          sound: newTaskForm.sound || 'chime',
+          imageUrl: newTaskForm.imageUrl || '',
+          audioUrl: newTaskForm.audioUrl || '',
+          completed: false
+        };
+
+        const updated = [...tasks, newTask].sort((a, b) => a.time.localeCompare(b.time));
+        setTasks(updated);
+        syncToCloud(updated, totalStars);
+        setNewTaskForm({ title: '', time: '12:00', stars: 2, icon: '🍦', sound: 'chime', imageUrl: '', audioUrl: '' });
+      };
+
+      const handleDeleteTask = (id) => {
+        const updated = tasks.filter(t => t.id !== id);
+        setTasks(updated);
+        syncToCloud(updated, totalStars);
+      };
+
+      const handleResetDailyTasks = () => {
+        const updated = tasks.map(t => ({ ...t, completed: false }));
+        setTasks(updated);
+        syncToCloud(updated, totalStars);
+      };
+
+      const handlePinSubmit = (e) => {
+        e.preventDefault();
+        if (pinInput === parentPin) {
+          setIsPinLocked(false);
+          setPinError(false);
+          setPinInput('');
+        } else {
+          setPinError(true);
+          setPinInput('');
+        }
+      };
+
+      const completedCount = tasks.filter(t => t.completed).length;
+      const progressPercent = tasks.length > 0 ? Math.round((completedCount / tasks.length) * 100) : 0;
+
+      // 格式化時間為 HH:mm 僅保留時與分
+      const formattedTimeStr = currentTime.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false });
+
+      return (
+        <div className="min-h-screen flex flex-col">
+          {/* Header 導覽列 */}
+          <header className="bg-white border-b border-slate-200 px-4 py-3 sticky top-0 z-30 flex items-center justify-between shadow-sm">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-pink-400 to-amber-400 flex items-center justify-center text-white font-bold text-xl shadow-md">
+                🍦
+              </div>
+              <div>
+                <h1 className="font-black text-slate-800 text-lg sm:text-xl">兒童自律時鐘</h1>
+                <p className="text-xs text-slate-400">免開電腦 • 手機與平板即時同步</p>
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => {
+                  if (!audioEnabled) initAudio();
+                  else setAudioEnabled(false);
+                }}
+                className={`text-xs px-3 py-2 rounded-xl font-bold transition flex items-center space-x-1 ${
+                  audioEnabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'
+                }`}
+              >
+                <span>{audioEnabled ? '🔊 提示音已開啟' : '🔇 點擊啟用聲音'}</span>
+              </button>
+
+              <div className="bg-slate-100 p-1 rounded-2xl flex border border-slate-200">
+                <button
+                  onClick={() => setViewMode('kid')}
+                  className={`px-3 py-1.5 rounded-xl text-xs sm:text-sm font-extrabold transition ${
+                    viewMode === 'kid' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'
+                  }`}
+                >
+                  📱 兒童時鐘
+                </button>
+                <button
+                  onClick={() => setViewMode('parent')}
+                  className={`px-3 py-1.5 rounded-xl text-xs sm:text-sm font-extrabold transition ${
+                    viewMode === 'parent' ? 'bg-white text-amber-600 shadow-sm' : 'text-slate-500'
+                  }`}
+                >
+                  🔒 家長後台
+                </button>
+              </div>
+            </div>
+          </header>
+
+          {/* 內容區塊 */}
+          <main className="flex-1 max-w-5xl w-full mx-auto p-4 sm:p-6">
+            {viewMode === 'kid' ? (
+              /* 時鐘模式 */
+              <div className="space-y-6">
+                {/* 頂部大時鐘橫幅：左側大時間（時/分），右側天氣 */}
+                <div className="bg-gradient-to-r from-sky-400 via-indigo-500 to-purple-500 rounded-3xl p-6 sm:p-8 text-white shadow-xl relative overflow-hidden">
+                  <div className="flex flex-row justify-between items-center">
+                    {/* 左側：大時間與冰淇淋計數 */}
+                    <div>
+                      <div className="text-white/80 font-bold text-sm">
+                        📅 {currentTime.toLocaleDateString('zh-TW', { weekday: 'long', month: 'long', day: 'numeric' })}
+                      </div>
+                      <div className="text-6xl sm:text-7xl font-black font-mono my-2 tracking-wide">
+                        {formattedTimeStr}
+                      </div>
+                      <p className="text-white/90 text-sm font-bold">
+                        今日已收穫 <span className="text-pink-300 text-xl px-1">{totalStars}</span> 支冰淇淋 🍦
+                      </p>
+                    </div>
+
+                    {/* 右側：天氣 */}
+                    <div className="bg-white/10 backdrop-blur-md p-4 sm:p-5 rounded-2xl border border-white/20 flex items-center space-x-3">
+                      <div className="text-4xl sm:text-5xl">{weather.icon}</div>
+                      <div>
+                        <div className="text-lg sm:text-xl font-bold">{weather.temp}</div>
+                        <div className="text-xs sm:text-sm text-white/80">{weather.label}</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 習慣累積進度條（冰淇淋獎勵） */}
+                  <div className="mt-6 bg-white/15 backdrop-blur-md rounded-2xl p-4 border border-white/20">
+                    <div className="flex justify-between items-center text-xs sm:text-sm mb-2 font-bold">
+                      <span>🍦 今日完成進度</span>
+                      <span className="text-pink-300">{completedCount} / {tasks.length} ({progressPercent}%)</span>
+                    </div>
+                    <div className="w-full h-3 bg-black/20 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-gradient-to-r from-pink-300 via-rose-400 to-amber-300 rounded-full transition-all duration-700"
+                        style={{ width: `${progressPercent}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* 每日任務列表 */}
+                <div>
+                  <h2 className="font-extrabold text-slate-800 text-lg mb-4">📋 今日習慣任務</h2>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {tasks.map((task) => (
+                      <div
+                        key={task.id}
+                        className={`rounded-3xl p-5 border-2 transition flex flex-col justify-between ${
+                          task.completed
+                            ? 'bg-slate-100 border-slate-200 opacity-75'
+                            : 'bg-white border-slate-100 shadow-md hover:shadow-lg'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between">
+                          <div className="flex items-center space-x-3">
+                            {task.imageUrl ? (
+                              <img src={task.imageUrl} alt={task.title} className="w-12 h-12 object-cover rounded-2xl border border-slate-100" />
+                            ) : (
+                              <div className="text-3xl bg-slate-50 p-2 rounded-2xl border border-slate-100">{task.icon}</div>
+                            )}
+                            <div>
+                              <div className="text-xs font-bold text-indigo-600 font-mono bg-indigo-50 px-2 py-0.5 rounded-md inline-block mb-1">
+                                ⏰ {task.time}
+                              </div>
+                              <h4 className={`font-bold text-base ${task.completed ? 'line-through text-slate-400' : 'text-slate-800'}`}>
+                                {task.title}
+                              </h4>
+                            </div>
+                          </div>
+                          <span className="bg-pink-50 px-2 py-1 rounded-xl text-xs font-bold text-pink-600 border border-pink-100">
+                            +{task.stars} 🍦
+                          </span>
+                        </div>
+
+                        <div className="mt-5 pt-3 border-t border-slate-100 flex items-center justify-between">
+                          <span className="text-xs text-slate-400">{task.completed ? '🎉 已完成' : '⏳ 等待中'}</span>
+                          <button
+                            onClick={() => handleToggleTaskStatus(task.id)}
+                            className={`px-4 py-2 rounded-xl text-xs font-extrabold transition ${
+                              task.completed
+                                ? 'bg-slate-200 text-slate-600'
+                                : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm'
+                            }`}
+                          >
+                            {task.completed ? '標記未完成' : '完成了！'}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              /* 家長管理後台 */
+              <div>
+                {isPinLocked ? (
+                  <div className="max-w-md mx-auto my-12 bg-white rounded-3xl p-8 border border-slate-200 shadow-xl text-center space-y-6">
+                    <div className="w-16 h-16 bg-amber-100 text-amber-600 rounded-3xl flex items-center justify-center mx-auto text-3xl">🔒</div>
+                    <div>
+                      <h2 className="text-xl font-black text-slate-800">家長後台安全解鎖</h2>
+                      <p className="text-xs text-slate-500 mt-1">請輸入預設密碼 (預設 PIN: 1234)</p>
+                    </div>
+
+                    <form onSubmit={handlePinSubmit} className="space-y-4">
+                      <input
+                        type="password"
+                        maxLength={6}
+                        value={pinInput}
+                        onChange={(e) => setPinInput(e.target.value)}
+                        placeholder="請輸入密碼"
+                        className="w-full text-center tracking-widest text-2xl font-bold py-3 border-2 border-slate-200 rounded-2xl focus:border-amber-400 outline-none"
+                      />
+                      {pinError && <p className="text-xs text-red-500 font-bold">密碼錯誤，請再試一次</p>}
+                      <button type="submit" className="w-full bg-slate-900 text-white font-bold py-3 rounded-2xl">解鎖進入</button>
+                    </form>
+                  </div>
+                ) : (
+                  <div className="space-y-6">
+                    <div className="bg-slate-900 text-white p-6 rounded-3xl flex justify-between items-center">
+                      <div>
+                        <h2 className="text-xl font-black">家長任務管理控制台</h2>
+                        <p className="text-xs text-slate-400 mt-0.5">所有變更將會即時雲端同步至所有裝置</p>
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <button
+                          onClick={handleResetDailyTasks}
+                          className="bg-slate-800 hover:bg-slate-700 text-xs font-bold px-3 py-2 rounded-xl text-slate-300"
+                        >
+                          🔄 重設今日完成狀態
+                        </button>
+                        <button
+                          onClick={() => setIsPinLocked(true)}
+                          className="bg-amber-400 hover:bg-amber-500 text-slate-900 text-xs font-bold px-3 py-2 rounded-xl"
+                        >
+                          鎖定後台
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                      {/* 左側：新增任務 */}
+                      <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-4">
+                        <h3 className="font-extrabold text-slate-800 text-base">➕ 新增提醒任務</h3>
+                        <form onSubmit={handleAddNewTask} className="space-y-4 text-xs">
+                          <div>
+                            <label className="block text-slate-600 font-bold mb-1">任務名稱</label>
+                            <input
+                              type="text"
+                              required
+                              placeholder="例如：整理房間、讀繪本..."
+                              value={newTaskForm.title}
+                              onChange={(e) => setNewTaskForm({ ...newTaskForm, title: e.target.value })}
+                              className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:border-indigo-500 outline-none"
+                            />
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-slate-600 font-bold mb-1">提醒時間</label>
+                              <input
+                                type="time"
+                                required
+                                value={newTaskForm.time}
+                                onChange={(e) => setNewTaskForm({ ...newTaskForm, time: e.target.value })}
+                                className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm font-mono focus:border-indigo-500 outline-none"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-slate-600 font-bold mb-1">獎勵冰淇淋</label>
+                              <select
+                                value={newTaskForm.stars}
+                                onChange={(e) => setNewTaskForm({ ...newTaskForm, stars: e.target.value })}
+                                className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:border-indigo-500 outline-none"
+                              >
+                                <option value={1}>1 支 🍦</option>
+                                <option value={2}>2 支 🍦🍦</option>
+                                <option value={3}>3 支 🍦🍦🍦</option>
+                              </select>
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="block text-slate-600 font-bold mb-1">自訂圖片網址 (預覽優先顯示)</label>
+                            <input
+                              type="url"
+                              placeholder="貼上圖片網址 (例如 https://.../image.jpg)"
+                              value={newTaskForm.imageUrl}
+                              onChange={(e) => setNewTaskForm({ ...newTaskForm, imageUrl: e.target.value })}
+                              className="w-full border border-slate-200 rounded-xl px-3 py-2 text-xs focus:border-indigo-500 outline-none"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block text-slate-600 font-bold mb-1">自訂提醒音效網址 (MP3)</label>
+                            <input
+                              type="url"
+                              placeholder="貼上音效檔網址 (例如 https://.../alarm.mp3)"
+                              value={newTaskForm.audioUrl}
+                              onChange={(e) => setNewTaskForm({ ...newTaskForm, audioUrl: e.target.value })}
+                              className="w-full border border-slate-200 rounded-xl px-3 py-2 text-xs focus:border-indigo-500 outline-none"
+                            />
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-slate-600 font-bold mb-1">預設 Emoji</label>
+                              <select
+                                value={newTaskForm.icon}
+                                onChange={(e) => setNewTaskForm({ ...newTaskForm, icon: e.target.value })}
+                                className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:border-indigo-500 outline-none"
+                              >
+                                <option value="🪥">🪥 刷牙洗臉</option>
+                                <option value="🍳">🍳 吃早餐</option>
+                                <option value="📚">📚 寫作業</option>
+                                <option value="🧸">🧸 收玩具</option>
+                                <option value="🛁">🛁 洗澡</option>
+                                <option value="🛌">🛌 睡覺</option>
+                                <option value="🍦">🍦 冰淇淋</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="block text-slate-600 font-bold mb-1">預設音效</label>
+                              <select
+                                value={newTaskForm.sound}
+                                onChange={(e) => setNewTaskForm({ ...newTaskForm, sound: e.target.value })}
+                                className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:border-indigo-500 outline-none"
+                              >
+                                <option value="chime">風鈴聲</option>
+                                <option value="cheer">歡呼號角</option>
+                              </select>
+                            </div>
+                          </div>
+
+                          <button
+                            type="submit"
+                            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl shadow-md transition text-sm"
+                          >
+                            儲存並加入任務
+                          </button>
+                        </form>
+                      </div>
+
+                      {/* 右側：任務列表管理 */}
+                      <div className="lg:col-span-2 bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-4">
+                        <div className="flex justify-between items-center">
+                          <h3 className="font-extrabold text-slate-800 text-base">現有任務列表 ({tasks.length})</h3>
+                          <span className="text-xs text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full font-bold border border-emerald-100">
+                            🟢 Firebase 雲端自動同步中
+                          </span>
+                        </div>
+
+                        <div className="space-y-3">
+                          {tasks.map((task) => (
+                            <div key={task.id} className="flex items-center justify-between p-4 bg-slate-50 border border-slate-200 rounded-2xl">
+                              <div className="flex items-center space-x-3">
+                                {task.imageUrl ? (
+                                  <img src={task.imageUrl} alt={task.title} className="w-10 h-10 object-cover rounded-xl" />
+                                ) : (
+                                  <span className="text-2xl">{task.icon}</span>
+                                )}
+                                <div>
+                                  <div className="font-bold text-slate-800 text-sm">{task.title}</div>
+                                  <div className="text-xs text-slate-400 font-mono">⏰ {task.time} | 🍦 +{task.stars}</div>
+                                </div>
+                              </div>
+                              <div className="flex items-center space-x-2">
+                                <button
+                                  onClick={() => triggerAlarm(task)}
+                                  className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl text-xs font-bold"
+                                >
+                                  試聽鬧鐘
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteTask(task.id)}
+                                  className="px-3 py-1.5 bg-red-100 hover:bg-red-200 text-red-600 rounded-xl text-xs font-bold"
+                                >
+                                  刪除
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </main>
+
+          {/* 全螢幕時間到達鬧鐘彈窗 */}
+          {activeAlarmTask && (
+            <div className="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-md flex items-center justify-center p-4">
+              <div className="bg-white rounded-3xl max-w-md w-full p-8 text-center space-y-6 shadow-2xl border-4 border-pink-300 relative animate-bounce-gentle">
+                {activeAlarmTask.imageUrl ? (
+                  <img src={activeAlarmTask.imageUrl} alt={activeAlarmTask.title} className="w-32 h-32 object-cover rounded-3xl mx-auto shadow-md border-2 border-slate-100" />
+                ) : (
+                  <div className="text-7xl mt-2">{activeAlarmTask.icon}</div>
+                )}
+                <div>
+                  <span className="bg-pink-100 text-pink-800 font-bold text-xs px-3 py-1 rounded-full">
+                    ⏰ 時間到了！
+                  </span>
+                  <h2 className="text-3xl font-black text-slate-900 mt-2">{activeAlarmTask.title}</h2>
+                  <p className="text-sm text-slate-500 mt-1">
+                    完成這個習慣，就能獲得 <span className="font-extrabold text-pink-500 text-base">{activeAlarmTask.stars} 支冰淇淋</span>！
+                  </p>
+                </div>
+
+                <div>
+                  <button
+                    onClick={() => handleCompleteTask(activeAlarmTask.id)}
+                    className="w-full bg-gradient-to-r from-pink-400 to-rose-500 text-white font-black text-lg py-4 rounded-2xl shadow-xl transition transform active:scale-95"
+                  >
+                    按這裡：我完成了！ 🍦
+                  </button>
+                  <button
+                    onClick={() => setActiveAlarmTask(null)}
+                    className="mt-3 text-xs text-slate-400 hover:text-slate-600 underline"
+                  >
+                    稍後再提醒我
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // 將 React App 掛載至 root 節點
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
