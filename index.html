@@ -18,7 +18,7 @@
       font-family: 'Noto Sans TC', 'Inter', sans-serif;
     }
     @keyframes bounce-gentle {
-      0%, 100% { transform: translateY(-3%); }
+      0%, 100% { transform: translateY(-2%); }
       50% { transform: translateY(0); }
     }
     .animate-bounce-gentle {
@@ -35,7 +35,7 @@
     import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
     import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-    // 使用您提供專屬的 Firebase 設定
+    // 使用您專屬的 Firebase 設定
     const firebaseConfig = {
       apiKey: "AIzaSyAHisZyZDVQYIKDBFv5uqwTRk1GFztg-g0",
       authDomain: "kidalarm-a8b85.firebaseapp.com",
@@ -90,14 +90,14 @@
         audioUrl: ''
       });
 
-      // 1. 雲端同步發送函式 (高優先權)
+      // 1. 雲端同步發送函式 (使用標準簡化路徑 kidalarm/routineData)
       const syncToCloud = async (updatedTasks, updatedStars) => {
         if (!window.firebaseDb || !window.firebaseHelpers) return;
         const { doc, setDoc } = window.firebaseHelpers;
         const db = window.firebaseDb;
 
         try {
-          const docRef = doc(db, 'artifacts', 'kidalarm-app', 'public', 'data', 'routineData');
+          const docRef = doc(db, 'kidalarm', 'routineData');
           await setDoc(docRef, {
             tasks: updatedTasks ?? tasks,
             totalStars: updatedStars ?? totalStars,
@@ -125,10 +125,10 @@
           try {
             await signInAnonymously(auth);
           } catch (e) {
-            console.warn("匿名驗證失敗，切換為本機載入:", e);
+            console.warn("匿名驗證失敗，切換為離線監聽模式:", e);
           }
 
-          const docRef = doc(db, 'artifacts', 'kidalarm-app', 'public', 'data', 'routineData');
+          const docRef = doc(db, 'kidalarm', 'routineData');
           
           unsubscribe = onSnapshot(docRef, (docSnap) => {
             if (docSnap.exists()) {
@@ -485,7 +485,7 @@
                           </div>
 
                           <div>
-                            <label className="block text-slate-600 font-bold mb-1">自訂圖片網址 (預覽優先顯示)</label>
+                            <label className="block text-slate-600 font-bold mb-1">自訂圖片網址 (彈窗滿版顯示)</label>
                             <input
                               type="url"
                               placeholder="貼上圖片網址 (例如 https://.../image.jpg)"
@@ -599,39 +599,52 @@
             )}
           </main>
 
-          {/* 全螢幕時間到達鬧鐘彈窗 */}
+          {/* 全螢幕/大圖醒目鬧鐘彈窗 */}
           {activeAlarmTask && (
-            <div className="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-md flex items-center justify-center p-4">
-              <div className="bg-white rounded-3xl max-w-md w-full p-8 text-center space-y-6 shadow-2xl border-4 border-pink-300 relative animate-bounce-gentle">
-                {activeAlarmTask.imageUrl ? (
-                  <img src={activeAlarmTask.imageUrl} alt={activeAlarmTask.title} className="w-32 h-32 object-cover rounded-3xl mx-auto shadow-md border-2 border-slate-100" />
-                ) : (
-                  <div className="text-7xl mt-2">{activeAlarmTask.icon}</div>
-                )}
-                <div>
-                  <span className="bg-pink-100 text-pink-800 font-bold text-xs px-3 py-1 rounded-full">
-                    ⏰ 時間到了！
-                  </span>
-                  <h2 className="text-3xl font-black text-slate-900 mt-2">{activeAlarmTask.title}</h2>
-                  <p className="text-sm text-slate-500 mt-1">
-                    完成這個習慣，就能獲得 <span className="font-extrabold text-pink-500 text-base">{activeAlarmTask.stars} 支冰淇淋</span>！
-                  </p>
+            <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
+              <div className="bg-white rounded-3xl max-w-lg w-full overflow-hidden shadow-2xl border-4 border-pink-400 relative animate-bounce-gentle flex flex-col">
+                
+                {/* 滿版大圖顯示區域 */}
+                <div className="w-full bg-slate-100 relative min-h-[220px] max-h-[320px] flex items-center justify-center overflow-hidden">
+                  {activeAlarmTask.imageUrl ? (
+                    <img 
+                      src={activeAlarmTask.imageUrl} 
+                      alt={activeAlarmTask.title} 
+                      className="w-full h-full object-cover max-h-[320px]" 
+                    />
+                  ) : (
+                    <div className="text-8xl py-8">{activeAlarmTask.icon}</div>
+                  )}
+                  <div className="absolute top-3 left-3 bg-pink-500 text-white font-black text-xs px-3 py-1.5 rounded-full shadow-md flex items-center space-x-1">
+                    <span>⏰ 時間到了！</span>
+                  </div>
                 </div>
 
-                <div>
-                  <button
-                    onClick={() => handleCompleteTask(activeAlarmTask.id)}
-                    className="w-full bg-gradient-to-r from-pink-400 to-rose-500 text-white font-black text-lg py-4 rounded-2xl shadow-xl transition transform active:scale-95"
-                  >
-                    按這裡：我完成了！ 🍦
-                  </button>
-                  <button
-                    onClick={() => setActiveAlarmTask(null)}
-                    className="mt-3 text-xs text-slate-400 hover:text-slate-600 underline"
-                  >
-                    稍後再提醒我
-                  </button>
+                {/* 文字與操作按鈕區域 */}
+                <div className="p-6 text-center space-y-4">
+                  <div>
+                    <h2 className="text-3xl font-black text-slate-900">{activeAlarmTask.title}</h2>
+                    <p className="text-sm text-slate-500 mt-1">
+                      完成這個習慣，就能獲得 <span className="font-extrabold text-pink-500 text-lg">{activeAlarmTask.stars} 支冰淇淋</span>！
+                    </p>
+                  </div>
+
+                  <div>
+                    <button
+                      onClick={() => handleCompleteTask(activeAlarmTask.id)}
+                      className="w-full bg-gradient-to-r from-pink-400 to-rose-500 hover:from-pink-500 hover:to-rose-600 text-white font-black text-xl py-4 rounded-2xl shadow-xl transition transform active:scale-95"
+                    >
+                      按這裡：我完成了！ 🍦
+                    </button>
+                    <button
+                      onClick={() => setActiveAlarmTask(null)}
+                      className="mt-3 text-xs text-slate-400 hover:text-slate-600 underline block mx-auto"
+                    >
+                      稍後再提醒我
+                    </button>
+                  </div>
                 </div>
+
               </div>
             </div>
           )}
