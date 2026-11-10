@@ -61,6 +61,16 @@
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
 
+    // 預設習慣任務列表
+    const INITIAL_TASKS = [
+      { id: '1', title: '起床刷牙洗臉', time: '07:30', stars: 2, icon: '🪥', sound: 'chime', imageUrl: '', audioUrl: '', completed: false },
+      { id: '2', title: '吃營養早餐', time: '08:00', stars: 1, icon: '🍳', sound: 'cheer', imageUrl: '', audioUrl: '', completed: false },
+      { id: '3', title: '寫作業與閱讀', time: '16:30', stars: 3, icon: '📚', sound: 'chime', imageUrl: '', audioUrl: '', completed: false },
+      { id: '4', title: '收拾玩具書包', time: '19:00', stars: 2, icon: '🧸', sound: 'cheer', imageUrl: '', audioUrl: '', completed: false },
+      { id: '5', title: '洗澡洗頭準備', time: '20:30', stars: 2, icon: '🛁', sound: 'chime', imageUrl: '', audioUrl: '', completed: false },
+      { id: '6', title: '上床睡覺囉', time: '21:30', stars: 3, icon: '🛌', sound: 'chime', imageUrl: '', audioUrl: '', completed: false }
+    ];
+
     function App() {
       const [viewMode, setViewMode] = useState('kid'); // 'kid' 或 'parent'
       const [isPinLocked, setIsPinLocked] = useState(true);
@@ -74,7 +84,7 @@
       const [currentTime, setCurrentTime] = useState(new Date());
       const [weather, setWeather] = useState({ temp: '26°C', label: '晴朗舒適', icon: '☀️' });
 
-      const [tasks, setTasks] = useState([]);
+      const [tasks, setTasks] = useState(INITIAL_TASKS);
       const [totalStars, setTotalStars] = useState(0);
       const [isLoaded, setIsLoaded] = useState(false);
       const [activeAlarmTask, setActiveAlarmTask] = useState(null);
@@ -90,16 +100,23 @@
         audioUrl: ''
       });
 
-      // 1. 雲端同步發送函式 (使用標準簡化路徑 kidalarm/routineData)
+      // 1. 雲端同步發送函式 (加上防護網：禁止空陣列覆寫雲端)
       const syncToCloud = async (updatedTasks, updatedStars) => {
         if (!window.firebaseDb || !window.firebaseHelpers) return;
+        
+        // 【核心安全防護】如果傳進來的任務是空的，絕對不覆寫雲端
+        if (!updatedTasks || updatedTasks.length === 0) {
+          console.warn("攔截到空的任務陣列，取消同步以防資料遺失。");
+          return;
+        }
+
         const { doc, setDoc } = window.firebaseHelpers;
         const db = window.firebaseDb;
 
         try {
           const docRef = doc(db, 'kidalarm', 'routineData');
           await setDoc(docRef, {
-            tasks: updatedTasks ?? tasks,
+            tasks: updatedTasks,
             totalStars: updatedStars ?? totalStars,
             updatedAt: new Date().toISOString()
           }, { merge: true });
@@ -118,7 +135,7 @@
             return;
           }
 
-          const { doc, onSnapshot, signInAnonymously } = window.firebaseHelpers;
+          const { doc, setDoc, onSnapshot, signInAnonymously } = window.firebaseHelpers;
           const auth = window.firebaseAuth;
           const db = window.firebaseDb;
 
@@ -133,8 +150,15 @@
           unsubscribe = onSnapshot(docRef, (docSnap) => {
             if (docSnap.exists()) {
               const data = docSnap.data();
-              if (Array.isArray(data.tasks)) setTasks(data.tasks);
-              if (typeof data.totalStars === 'number') setTotalStars(data.totalStars);
+              if (Array.isArray(data.tasks) && data.tasks.length > 0) {
+                setTasks(data.tasks);
+              }
+              if (typeof data.totalStars === 'number') {
+                setTotalStars(data.totalStars);
+              }
+            } else {
+              // 如果雲端完全沒資料，初始化寫入預設任務
+              setDoc(docRef, { tasks: INITIAL_TASKS, totalStars: 0 }, { merge: true });
             }
             setIsLoaded(true);
           }, (err) => {
@@ -276,6 +300,10 @@
 
       const handleDeleteTask = (id) => {
         const updated = tasks.filter(t => t.id !== id);
+        if (updated.length === 0) {
+          alert("至少必須保留一個任務，不能全部刪除喔！");
+          return;
+        }
         setTasks(updated);
         syncToCloud(updated, totalStars);
       };
