@@ -86,9 +86,16 @@
 
       const [tasks, setTasks] = useState(INITIAL_TASKS);
       const [totalStars, setTotalStars] = useState(0);
+      const [goalTarget, setGoalTarget] = useState(10); // 自訂目標冰淇淋數量
       const [isLoaded, setIsLoaded] = useState(false);
       const [activeAlarmTask, setActiveAlarmTask] = useState(null);
       const [triggeredToday, setTriggeredToday] = useState(new Set());
+
+      // 兒童模式全螢幕鎖定狀態
+      const [isKidFullscreenLocked, setIsKidFullscreenLocked] = useState(false);
+      const [unlockModalOpen, setUnlockModalOpen] = useState(false);
+      const [unlockPinInput, setUnlockPinInput] = useState('');
+      const [unlockError, setUnlockError] = useState(false);
 
       const [newTaskForm, setNewTaskForm] = useState({
         title: '',
@@ -100,15 +107,10 @@
         audioUrl: ''
       });
 
-      // 1. 雲端同步發送函式 (加上防護網：禁止空陣列覆寫雲端)
-      const syncToCloud = async (updatedTasks, updatedStars) => {
+      // 1. 雲端同步發送函式 (防護：禁止空陣列覆寫)
+      const syncToCloud = async (updatedTasks, updatedStars, updatedGoal) => {
         if (!window.firebaseDb || !window.firebaseHelpers) return;
-        
-        // 【核心安全防護】如果傳進來的任務是空的，絕對不覆寫雲端
-        if (!updatedTasks || updatedTasks.length === 0) {
-          console.warn("攔截到空的任務陣列，取消同步以防資料遺失。");
-          return;
-        }
+        if (!updatedTasks || updatedTasks.length === 0) return;
 
         const { doc, setDoc } = window.firebaseHelpers;
         const db = window.firebaseDb;
@@ -118,6 +120,7 @@
           await setDoc(docRef, {
             tasks: updatedTasks,
             totalStars: updatedStars ?? totalStars,
+            goalTarget: updatedGoal ?? goalTarget,
             updatedAt: new Date().toISOString()
           }, { merge: true });
         } catch (err) {
@@ -142,7 +145,7 @@
           try {
             await signInAnonymously(auth);
           } catch (e) {
-            console.warn("匿名驗證失敗，切換為離線監聽模式:", e);
+            console.warn("匿名驗證失敗:", e);
           }
 
           const docRef = doc(db, 'kidalarm', 'routineData');
@@ -156,9 +159,11 @@
               if (typeof data.totalStars === 'number') {
                 setTotalStars(data.totalStars);
               }
+              if (typeof data.goalTarget === 'number' && data.goalTarget > 0) {
+                setGoalTarget(data.goalTarget);
+              }
             } else {
-              // 如果雲端完全沒資料，初始化寫入預設任務
-              setDoc(docRef, { tasks: INITIAL_TASKS, totalStars: 0 }, { merge: true });
+              setDoc(docRef, { tasks: INITIAL_TASKS, totalStars: 0, goalTarget: 10 }, { merge: true });
             }
             setIsLoaded(true);
           }, (err) => {
@@ -198,7 +203,7 @@
         return () => clearInterval(timer);
       }, [tasks, triggeredToday, isLoaded]);
 
-      // 4. Web Audio 與自訂音效播放器
+      // 4. 音效處理
       const initAudio = () => {
         if (!audioCtxRef.current) {
           const AudioCtx = window.AudioContext || window.webkitAudioContext;
@@ -214,7 +219,7 @@
         if (customAudioUrl) {
           try {
             const customAudio = new Audio(customAudioUrl);
-            customAudio.play().catch(e => console.warn("無法播放自訂音效，改用預設音效", e));
+            customAudio.play().catch(e => console.warn("無法播放自訂音效", e));
             return;
           } catch(e) {}
         }
@@ -261,7 +266,7 @@
         }
       };
 
-      // 5. 任務操作控制
+      // 5. 任務與目標操作
       const handleCompleteTask = (taskId) => {
         const target = tasks.find(t => t.id === taskId);
         const earned = target ? target.stars : 2;
@@ -270,7 +275,7 @@
 
         setTasks(updated);
         setTotalStars(newStars);
-        syncToCloud(updated, newStars);
+        syncToCloud(updated, newStars, goalTarget);
         setActiveAlarmTask(null);
 
         if (audioEnabled) playSoundEffect('cheer');
@@ -294,24 +299,30 @@
 
         const updated = [...tasks, newTask].sort((a, b) => a.time.localeCompare(b.time));
         setTasks(updated);
-        syncToCloud(updated, totalStars);
+        syncToCloud(updated, totalStars, goalTarget);
         setNewTaskForm({ title: '', time: '12:00', stars: 2, icon: '🍦', sound: 'chime', imageUrl: '', audioUrl: '' });
       };
 
       const handleDeleteTask = (id) => {
         const updated = tasks.filter(t => t.id !== id);
         if (updated.length === 0) {
-          alert("至少必須保留一個任務，不能全部刪除喔！");
+          alert("至少必須保留一個任務！");
           return;
         }
         setTasks(updated);
-        syncToCloud(updated, totalStars);
+        syncToCloud(updated, totalStars, goalTarget);
       };
 
       const handleResetDailyTasks = () => {
         const updated = tasks.map(t => ({ ...t, completed: false }));
         setTasks(updated);
-        syncToCloud(updated, totalStars);
+        syncToCloud(updated, totalStars, goalTarget);
+      };
+
+      const handleUpdateGoal = (newGoal) => {
+        const val = Math.max(1, Number(newGoal) || 1);
+        setGoalTarget(val);
+        syncToCloud(tasks, totalStars, val);
       };
 
       const handlePinSubmit = (e) => {
@@ -326,66 +337,153 @@
         }
       };
 
-      const completedCount = tasks.filter(t => t.completed).length;
-      const progressPercent = tasks.length > 0 ? Math.round((completedCount / tasks.length) * 100) : 0;
+      // 進入全螢幕並鎖定
+      const enterKidFullscreen = () => {
+        if (!audioEnabled) initAudio();
+        const elem = document.documentElement;
+        if (elem.requestFullscreen) {
+          elem.requestFullscreen().catch(err => console.warn(err));
+        }
+        setIsKidFullscreenLocked(true);
+      };
+
+      // 解鎖退出全螢幕
+      const handleUnlockSubmit = (e) => {
+        e.preventDefault();
+        if (unlockPinInput === parentPin) {
+          setIsKidFullscreenLocked(false);
+          setUnlockModalOpen(false);
+          setUnlockPinInput('');
+          setUnlockError(false);
+          if (document.exitFullscreen) {
+            document.exitFullscreen().catch(err => console.warn(err));
+          }
+        } else {
+          setUnlockError(true);
+          setUnlockPinInput('');
+        }
+      };
+
       const formattedTimeStr = currentTime.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false });
 
+      // 計算目前進度格子顯示
+      const currentCollected = totalStars % goalTarget;
+      const displayCollectedCount = totalStars >= goalTarget ? goalTarget : currentCollected;
+
       return (
-        <div className="min-h-screen flex flex-col">
-          {/* Header 導覽列 */}
-          <header className="bg-white border-b border-slate-200 px-4 py-3 sticky top-0 z-30 flex items-center justify-between shadow-sm">
-            <div className="flex items-center space-x-3">
-              <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-pink-400 to-amber-400 flex items-center justify-center text-white font-bold text-xl shadow-md">
-                🍦
-              </div>
-              <div>
-                <h1 className="font-black text-slate-800 text-lg sm:text-xl">兒童自律時鐘</h1>
-                <p className="text-xs text-slate-400">免開電腦 • 手機與平板即時同步</p>
-              </div>
-            </div>
-
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={() => {
-                  if (!audioEnabled) initAudio();
-                  else setAudioEnabled(false);
-                }}
-                className={`text-xs px-3 py-2 rounded-xl font-bold transition flex items-center space-x-1 ${
-                  audioEnabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'
-                }`}
+        <div className={`min-h-screen flex flex-col ${isKidFullscreenLocked ? 'bg-slate-900 text-white' : 'bg-slate-50 text-slate-800'}`}>
+          
+          {/* 如果進入兒童全螢幕鎖定狀態，顯示隱形防誤觸遮罩與解鎖按鈕 */}
+          {isKidFullscreenLocked && (
+            <div className="fixed top-3 right-3 z-50">
+              <button 
+                onClick={() => setUnlockModalOpen(true)}
+                className="w-12 h-12 rounded-full bg-slate-800/60 hover:bg-slate-800 text-white/50 hover:text-white flex items-center justify-center backdrop-blur-md transition shadow-lg text-lg"
+                title="點擊輸入密碼解鎖"
               >
-                <span>{audioEnabled ? '🔊 提示音已開啟' : '🔇 點擊啟用聲音'}</span>
+                🔒
               </button>
+            </div>
+          )}
 
-              <div className="bg-slate-100 p-1 rounded-2xl flex border border-slate-200">
-                <button
-                  onClick={() => setViewMode('kid')}
-                  className={`px-3 py-1.5 rounded-xl text-xs sm:text-sm font-extrabold transition ${
-                    viewMode === 'kid' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'
-                  }`}
-                >
-                  📱 兒童時鐘
-                </button>
-                <button
-                  onClick={() => setViewMode('parent')}
-                  className={`px-3 py-1.5 rounded-xl text-xs sm:text-sm font-extrabold transition ${
-                    viewMode === 'parent' ? 'bg-white text-amber-600 shadow-sm' : 'text-slate-500'
-                  }`}
-                >
-                  🔒 家長後台
-                </button>
+          {/* 解鎖密碼彈窗 */}
+          {unlockModalOpen && (
+            <div className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
+              <div className="bg-white text-slate-900 rounded-3xl max-w-sm w-full p-8 text-center space-y-6 shadow-2xl border-4 border-amber-400">
+                <div className="w-16 h-16 bg-amber-100 text-amber-600 rounded-3xl flex items-center justify-center mx-auto text-3xl">🔒</div>
+                <div>
+                  <h2 className="text-xl font-black">輸入解鎖密碼</h2>
+                  <p className="text-xs text-slate-500 mt-1">請輸入家長 PIN 碼 (預設: 1234)</p>
+                </div>
+                <form onSubmit={handleUnlockSubmit} className="space-y-4">
+                  <input
+                    type="password"
+                    maxLength={6}
+                    autoFocus
+                    value={unlockPinInput}
+                    onChange={(e) => setUnlockPinInput(e.target.value)}
+                    placeholder="請輸入密碼"
+                    className="w-full text-center tracking-widest text-2xl font-bold py-3 border-2 border-slate-200 rounded-2xl focus:border-amber-400 outline-none"
+                  />
+                  {unlockError && <p className="text-xs text-red-500 font-bold">密碼錯誤，請再試一次</p>}
+                  <div className="flex space-x-2">
+                    <button type="button" onClick={() => setUnlockModalOpen(false)} className="flex-1 bg-slate-200 text-slate-700 font-bold py-3 rounded-2xl text-sm">取消</button>
+                    <button type="submit" className="flex-1 bg-slate-900 text-white font-bold py-3 rounded-2xl text-sm">解鎖</button>
+                  </div>
+                </form>
               </div>
             </div>
-          </header>
+          )}
+
+          {/* Header 導覽列（未鎖定時顯示） */}
+          {!isKidFullscreenLocked && (
+            <header className="bg-white border-b border-slate-200 px-4 py-3 sticky top-0 z-30 flex items-center justify-between shadow-sm">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-pink-400 to-amber-400 flex items-center justify-center text-white font-bold text-xl shadow-md">
+                  🍦
+                </div>
+                <div>
+                  <h1 className="font-black text-slate-800 text-lg sm:text-xl">兒童自律時鐘</h1>
+                  <p className="text-xs text-slate-400">免開電腦 • 手機與平板即時同步</p>
+                </div>
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => {
+                    if (!audioEnabled) initAudio();
+                    else setAudioEnabled(false);
+                  }}
+                  className={`text-xs px-3 py-2 rounded-xl font-bold transition flex items-center space-x-1 ${
+                    audioEnabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'
+                  }`}
+                >
+                  <span>{audioEnabled ? '🔊 提示音已開啟' : '🔇 點擊啟用聲音'}</span>
+                </button>
+
+                <div className="bg-slate-100 p-1 rounded-2xl flex border border-slate-200">
+                  <button
+                    onClick={() => setViewMode('kid')}
+                    className={`px-3 py-1.5 rounded-xl text-xs sm:text-sm font-extrabold transition ${
+                      viewMode === 'kid' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'
+                    }`}
+                  >
+                    📱 兒童時鐘
+                  </button>
+                  <button
+                    onClick={() => setViewMode('parent')}
+                    className={`px-3 py-1.5 rounded-xl text-xs sm:text-sm font-extrabold transition ${
+                      viewMode === 'parent' ? 'bg-white text-amber-600 shadow-sm' : 'text-slate-500'
+                    }`}
+                  >
+                    🔒 家長後台
+                  </button>
+                </div>
+              </div>
+            </header>
+          )}
 
           {/* 內容區塊 */}
-          <main className="flex-1 max-w-5xl w-full mx-auto p-4 sm:p-6">
+          <main className="flex-1 max-w-5xl w-full mx-auto p-4 sm:p-6 flex flex-col justify-center">
             {viewMode === 'kid' ? (
-              /* 時鐘模式：極簡大時鐘、天氣與冰淇淋進度條 */
+              /* 時鐘模式 */
               <div className="space-y-6">
                 <div className="bg-gradient-to-r from-sky-400 via-indigo-500 to-purple-500 rounded-3xl p-6 sm:p-10 text-white shadow-xl relative overflow-hidden">
-                  <div className="flex flex-row justify-between items-center">
-                    {/* 左側：大時間與冰淇淋計數 */}
+                  
+                  {/* 全螢幕鎖定按鈕（位於時鐘右上角） */}
+                  {!isKidFullscreenLocked && (
+                    <div className="absolute top-4 right-4">
+                      <button
+                        onClick={enterKidFullscreen}
+                        className="bg-white/20 hover:bg-white/30 text-white font-bold text-xs sm:text-sm px-4 py-2 rounded-2xl backdrop-blur-md border border-white/30 transition flex items-center space-x-1 shadow-md"
+                      >
+                        <span>⛶ 全螢幕鎖定</span>
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                    {/* 左側：大時間與累積計數 */}
                     <div>
                       <div className="text-white/80 font-bold text-base">
                         📅 {currentTime.toLocaleDateString('zh-TW', { weekday: 'long', month: 'long', day: 'numeric' })}
@@ -394,7 +492,7 @@
                         {formattedTimeStr}
                       </div>
                       <p className="text-white/90 text-base font-bold">
-                        今日已收穫 <span className="text-pink-300 text-2xl px-1">{totalStars}</span> 支冰淇淋 🍦
+                        累計總共收穫 <span className="text-pink-300 text-2xl px-1">{totalStars}</span> 支冰淇淋 🍦
                       </p>
                     </div>
 
@@ -408,19 +506,34 @@
                     </div>
                   </div>
 
-                  {/* 習慣累積進度條（冰淇淋獎勵） */}
-                  <div className="mt-8 bg-white/15 backdrop-blur-md rounded-2xl p-5 border border-white/20">
-                    <div className="flex justify-between items-center text-sm sm:text-base mb-3 font-bold">
-                      <span>🍦 今日完成進度</span>
-                      <span className="text-pink-300">{completedCount} / {tasks.length} ({progressPercent}%)</span>
+                  {/* 視覺化冰淇淋蒐集進度顯示 */}
+                  <div className="mt-8 bg-white/15 backdrop-blur-md rounded-3xl p-6 border border-white/20">
+                    <div className="flex justify-between items-center text-sm sm:text-base mb-4 font-bold">
+                      <span>🍦 目標蒐集進度 ({displayCollectedCount} / {goalTarget} 支)</span>
+                      <span className="text-pink-300 font-mono">總進度: {totalStars} 支</span>
                     </div>
-                    <div className="w-full h-4 bg-black/20 rounded-full overflow-hidden">
-                      <div 
-                        className="h-full bg-gradient-to-r from-pink-300 via-rose-400 to-amber-300 rounded-full transition-all duration-700"
-                        style={{ width: `${progressPercent}%` }}
-                      />
+
+                    {/* 冰淇淋圖示方格列：已蒐集彩色、未蒐集暗色 */}
+                    <div className="grid grid-cols-5 sm:grid-cols-10 gap-2 sm:gap-3">
+                      {Array.from({ length: goalTarget }).map((_, idx) => {
+                        const isCollected = idx < displayCollectedCount;
+                        return (
+                          <div 
+                            key={idx} 
+                            className={`aspect-square rounded-2xl flex items-center justify-center text-2xl sm:text-3xl transition-all duration-300 ${
+                              isCollected 
+                                ? 'bg-white shadow-lg scale-105 border-2 border-pink-300' 
+                                : 'bg-black/20 opacity-30 grayscale filter'
+                            }`}
+                            title={`冰淇淋 #${idx + 1} ${isCollected ? '已獲得' : '未獲得'}`}
+                          >
+                            🍦
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
+
                 </div>
               </div>
             ) : (
@@ -471,106 +584,96 @@
                     </div>
 
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                      {/* 左側：新增任務 */}
-                      <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-4">
-                        <h3 className="font-extrabold text-slate-800 text-base">➕ 新增提醒任務</h3>
-                        <form onSubmit={handleAddNewTask} className="space-y-4 text-xs">
+                      {/* 左側：設定目標與新增任務 */}
+                      <div className="space-y-6">
+                        {/* 目標設定卡片 */}
+                        <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-4">
+                          <h3 className="font-extrabold text-slate-800 text-base">🎯 冰淇淋蒐集目標設定</h3>
                           <div>
-                            <label className="block text-slate-600 font-bold mb-1">任務名稱</label>
+                            <label className="block text-slate-600 font-bold mb-1 text-xs">一輪目標蒐集幾支冰淇淋？</label>
                             <input
-                              type="text"
-                              required
-                              placeholder="例如：整理房間、讀繪本..."
-                              value={newTaskForm.title}
-                              onChange={(e) => setNewTaskForm({ ...newTaskForm, title: e.target.value })}
-                              className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:border-indigo-500 outline-none"
+                              type="number"
+                              min={1}
+                              max={50}
+                              value={goalTarget}
+                              onChange={(e) => handleUpdateGoal(e.target.value)}
+                              className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm font-mono focus:border-indigo-500 outline-none"
                             />
+                            <p className="text-[10px] text-slate-400 mt-1">設定後，兒童畫面的圖示方格會自動依照此數量呈現。</p>
                           </div>
+                        </div>
 
-                          <div className="grid grid-cols-2 gap-3">
+                        {/* 新增任務卡片 */}
+                        <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-4">
+                          <h3 className="font-extrabold text-slate-800 text-base">➕ 新增提醒任務</h3>
+                          <form onSubmit={handleAddNewTask} className="space-y-4 text-xs">
                             <div>
-                              <label className="block text-slate-600 font-bold mb-1">提醒時間</label>
+                              <label className="block text-slate-600 font-bold mb-1">任務名稱</label>
                               <input
-                                type="time"
+                                type="text"
                                 required
-                                value={newTaskForm.time}
-                                onChange={(e) => setNewTaskForm({ ...newTaskForm, time: e.target.value })}
-                                className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm font-mono focus:border-indigo-500 outline-none"
+                                placeholder="例如：整理房間、讀繪本..."
+                                value={newTaskForm.title}
+                                onChange={(e) => setNewTaskForm({ ...newTaskForm, title: e.target.value })}
+                                className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:border-indigo-500 outline-none"
                               />
                             </div>
-                            <div>
-                              <label className="block text-slate-600 font-bold mb-1">獎勵冰淇淋</label>
-                              <select
-                                value={newTaskForm.stars}
-                                onChange={(e) => setNewTaskForm({ ...newTaskForm, stars: e.target.value })}
-                                className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:border-indigo-500 outline-none"
-                              >
-                                <option value={1}>1 支 🍦</option>
-                                <option value={2}>2 支 🍦🍦</option>
-                                <option value={3}>3 支 🍦🍦🍦</option>
-                              </select>
+
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="block text-slate-600 font-bold mb-1">提醒時間</label>
+                                <input
+                                  type="time"
+                                  required
+                                  value={newTaskForm.time}
+                                  onChange={(e) => setNewTaskForm({ ...newTaskForm, time: e.target.value })}
+                                  className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm font-mono focus:border-indigo-500 outline-none"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-slate-600 font-bold mb-1">獎勵冰淇淋</label>
+                                <select
+                                  value={newTaskForm.stars}
+                                  onChange={(e) => setNewTaskForm({ ...newTaskForm, stars: e.target.value })}
+                                  className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:border-indigo-500 outline-none"
+                                >
+                                  <option value={1}>1 支 🍦</option>
+                                  <option value={2}>2 支 🍦🍦</option>
+                                  <option value={3}>3 支 🍦🍦🍦</option>
+                                </select>
+                              </div>
                             </div>
-                          </div>
 
-                          <div>
-                            <label className="block text-slate-600 font-bold mb-1">自訂圖片網址 (彈窗滿版顯示)</label>
-                            <input
-                              type="url"
-                              placeholder="貼上圖片網址 (例如 https://.../image.jpg)"
-                              value={newTaskForm.imageUrl}
-                              onChange={(e) => setNewTaskForm({ ...newTaskForm, imageUrl: e.target.value })}
-                              className="w-full border border-slate-200 rounded-xl px-3 py-2 text-xs focus:border-indigo-500 outline-none"
-                            />
-                          </div>
-
-                          <div>
-                            <label className="block text-slate-600 font-bold mb-1">自訂提醒音效網址 (MP3)</label>
-                            <input
-                              type="url"
-                              placeholder="貼上音效檔網址 (例如 https://.../alarm.mp3)"
-                              value={newTaskForm.audioUrl}
-                              onChange={(e) => setNewTaskForm({ ...newTaskForm, audioUrl: e.target.value })}
-                              className="w-full border border-slate-200 rounded-xl px-3 py-2 text-xs focus:border-indigo-500 outline-none"
-                            />
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-3">
                             <div>
-                              <label className="block text-slate-600 font-bold mb-1">預設 Emoji</label>
-                              <select
-                                value={newTaskForm.icon}
-                                onChange={(e) => setNewTaskForm({ ...newTaskForm, icon: e.target.value })}
-                                className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:border-indigo-500 outline-none"
-                              >
-                                <option value="🪥">🪥 刷牙洗臉</option>
-                                <option value="🍳">🍳 吃早餐</option>
-                                <option value="📚">📚 寫作業</option>
-                                <option value="🧸">🧸 收玩具</option>
-                                <option value="🛁">🛁 洗澡</option>
-                                <option value="🛌">🛌 睡覺</option>
-                                <option value="🍦">🍦 冰淇淋</option>
-                              </select>
+                              <label className="block text-slate-600 font-bold mb-1">自訂圖片網址 (彈窗滿版顯示)</label>
+                              <input
+                                type="url"
+                                placeholder="貼上圖片網址 (https://.../image.jpg)"
+                                value={newTaskForm.imageUrl}
+                                onChange={(e) => setNewTaskForm({ ...newTaskForm, imageUrl: e.target.value })}
+                                className="w-full border border-slate-200 rounded-xl px-3 py-2 text-xs focus:border-indigo-500 outline-none"
+                              />
                             </div>
-                            <div>
-                              <label className="block text-slate-600 font-bold mb-1">預設音效</label>
-                              <select
-                                value={newTaskForm.sound}
-                                onChange={(e) => setNewTaskForm({ ...newTaskForm, sound: e.target.value })}
-                                className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:border-indigo-500 outline-none"
-                              >
-                                <option value="chime">風鈴聲</option>
-                                <option value="cheer">歡呼號角</option>
-                              </select>
-                            </div>
-                          </div>
 
-                          <button
-                            type="submit"
-                            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl shadow-md transition text-sm"
-                          >
-                            儲存並加入任務
-                          </button>
-                        </form>
+                            <div>
+                              <label className="block text-slate-600 font-bold mb-1">自訂提醒音效網址 (MP3)</label>
+                              <input
+                                type="url"
+                                placeholder="貼上音效檔網址 (https://.../alarm.mp3)"
+                                value={newTaskForm.audioUrl}
+                                onChange={(e) => setNewTaskForm({ ...newTaskForm, audioUrl: e.target.value })}
+                                className="w-full border border-slate-200 rounded-xl px-3 py-2 text-xs focus:border-indigo-500 outline-none"
+                              />
+                            </div>
+
+                            <button
+                              type="submit"
+                              className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl shadow-md transition text-sm"
+                            >
+                              儲存並加入任務
+                            </button>
+                          </form>
+                        </div>
                       </div>
 
                       {/* 右側：任務列表管理 */}
@@ -649,9 +752,9 @@
                 </div>
 
                 {/* 文字與操作按鈕區域 */}
-                <div className="p-6 text-center space-y-4">
+                <div className="p-6 text-slate-900 text-center space-y-4">
                   <div>
-                    <h2 className="text-3xl font-black text-slate-900">{activeAlarmTask.title}</h2>
+                    <h2 className="text-3xl font-black">{activeAlarmTask.title}</h2>
                     <p className="text-sm text-slate-500 mt-1">
                       完成這個習慣，就能獲得 <span className="font-extrabold text-pink-500 text-lg">{activeAlarmTask.stars} 支冰淇淋</span>！
                     </p>
